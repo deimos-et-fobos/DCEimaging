@@ -1,0 +1,16 @@
+# ignore all .o files in the subdirectory/ directory
+subdirectory/**/*.o
+
+# no .o .a .out .dat .pdf .mat files
+*.[oa]
+*.out
+*.dat
+*.pdf
+*.mat
+
+# but do track io.o, even though you're ignoring .o files above  
+#!io.o  
+
+# no ~ .swp files
+*~
+*.swp

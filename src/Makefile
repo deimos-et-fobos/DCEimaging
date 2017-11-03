@@ -2,10 +2,13 @@
 
 BIN_DIR=../bin/
 PROGRAM=DCEbiomarkers
+PROGRAM_ORIG=DCEbiomarkers_orig
 
 PROG=$(BIN_DIR)$(PROGRAM)
+PROG_ORIG=$(BIN_DIR)$(PROGRAM_ORIG)
 
 OBJS=DCEbiomarkers.o
+OBJS_ORIG=DCEbiomarkers_orig.o
 FFTDIR=FFT_CODE/
 FFTOBJS=$(FFTDIR)complex.o $(FFTDIR)fft.o
 LIBS=
@@ -18,10 +21,13 @@ CFLAGS= -Wall -g -c
 .c.o:
 	g++ $(CFLAGS) $<
 
-all: $(PROGRAM)
+all: $(PROGRAM) #$(PROGRAM_ORIG)
 
 $(PROGRAM): $(OBJS) $(FFTOBJS) FFTsrc
 	g++ -g -o $(PROG) $(OBJS) $(FFTOBJS) $(LIBDIR)$(LIBS)
+
+$(PROGRAM_ORIG): $(OBJS_ORIG) $(FFTOBJS) FFTsrc
+	g++ -g -o $(PROG_ORIG) $(OBJS_ORIG) $(FFTOBJS) $(LIBDIR)$(LIBS)
 
 FFTsrc:
 	(cd $(FFTDIR); make)

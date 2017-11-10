@@ -10,14 +10,11 @@
 //   Include math library
 #include <math.h>
 
-
-
-
 //   FORWARD FOURIER TRANSFORM
 //     Input  - input data
 //     Output - transform result
 //     N      - length of both input data and result
-bool CFFT::Forward(const complex *const Input, complex *const Output, const unsigned int N)
+CUDA_CALLABLE_MEMBER bool CFFT::Forward(const complex *const Input, complex *const Output, const unsigned int N)
 {
 	//   Check input parameters
 	if (!Input || !Output || N < 1 || N & (N - 1))
@@ -33,7 +30,7 @@ bool CFFT::Forward(const complex *const Input, complex *const Output, const unsi
 //   FORWARD FOURIER TRANSFORM, INPLACE VERSION
 //     Data - both input data and output
 //     N    - length of input data
-bool CFFT::Forward(complex *const Data, const unsigned int N)
+CUDA_CALLABLE_MEMBER bool CFFT::Forward(complex *const Data, const unsigned int N)
 {
 	//   Check input parameters
 	if (!Data || N < 1 || N & (N - 1))
@@ -51,7 +48,7 @@ bool CFFT::Forward(complex *const Data, const unsigned int N)
 //     Output - transform result
 //     N      - length of both input data and result
 //     Scale  - if to scale result
-bool CFFT::Inverse(const complex *const Input, complex *const Output, const unsigned int N, const bool Scale /* = true */)
+CUDA_CALLABLE_MEMBER bool CFFT::Inverse(const complex *const Input, complex *const Output, const unsigned int N, const bool Scale /* = true */)
 {
 	//   Check input parameters
 	if (!Input || !Output || N < 1 || N & (N - 1))
@@ -71,7 +68,7 @@ bool CFFT::Inverse(const complex *const Input, complex *const Output, const unsi
 //     Data  - both input data and output
 //     N     - length of both input data and result
 //     Scale - if to scale result
-bool CFFT::Inverse(complex *const Data, const unsigned int N, const bool Scale /* = true */)
+CUDA_CALLABLE_MEMBER bool CFFT::Inverse(complex *const Data, const unsigned int N, const bool Scale /* = true */)
 {
 	//   Check input parameters
 	if (!Data || N < 1 || N & (N - 1))
@@ -88,7 +85,7 @@ bool CFFT::Inverse(complex *const Data, const unsigned int N, const bool Scale /
 }
 
 //   Rearrange function
-void CFFT::Rearrange(const complex *const Input, complex *const Output, const unsigned int N)
+CUDA_CALLABLE_MEMBER void CFFT::Rearrange(const complex *const Input, complex *const Output, const unsigned int N)
 {
 	//   Data entry position
 	unsigned int Target = 0;
@@ -109,7 +106,7 @@ void CFFT::Rearrange(const complex *const Input, complex *const Output, const un
 }
 
 //   Inplace version of rearrange function
-void CFFT::Rearrange(complex *const Data, const unsigned int N)
+CUDA_CALLABLE_MEMBER void CFFT::Rearrange(complex *const Data, const unsigned int N)
 {
 	//   Swap position
 	unsigned int Target = 0;
@@ -136,7 +133,7 @@ void CFFT::Rearrange(complex *const Data, const unsigned int N)
 }
 
 //   FFT implementation
-void CFFT::Perform(complex *const Data, const unsigned int N, const bool Inverse /* = false */)
+CUDA_CALLABLE_MEMBER void CFFT::Perform(complex *const Data, const unsigned int N, const bool Inverse /* = false */)
 {
 	const float pi = Inverse ? 3.14159265358979323846 : -3.14159265358979323846;
 	//   Iteration through dyads, quadruples, octads and so on...
@@ -174,7 +171,7 @@ void CFFT::Perform(complex *const Data, const unsigned int N, const bool Inverse
 }
 
 //   Scaling of inverse FFT result
-void CFFT::Scale(complex *const Data, const unsigned int N)
+CUDA_CALLABLE_MEMBER void CFFT::Scale(complex *const Data, const unsigned int N)
 {
 	const float Factor = 1. / float(N);
 	//   Scale all data entries

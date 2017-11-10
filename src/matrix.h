@@ -13,7 +13,16 @@ class matrix{
 		/* Constructors */
 		matrix(): dim(0),sz(NULL),nd(0),data(NULL){};
 		matrix(const char *filename){ this->readFromBinary(filename); };
-		matrix(int ndim, int *sizes, int ndata): matrix(ndim,sizes,ndata,NULL){};
+		matrix(int ndim, int *sizes, int ndata): dim(ndim),nd(ndata){
+			sz = new int[ndim];
+			assert(sz);
+			for(int i=0;i<ndim;i++)
+				sz[i] = sizes[i];
+			data = new T[ndata];
+			assert(data);
+			for(int i=0;i<ndata;i++)
+					data[i] = 0;
+		};
 		matrix(int ndim, int *sizes, int ndata, T *d): dim(ndim),nd(ndata){
 			sz = new int[ndim];
 			assert(sz);

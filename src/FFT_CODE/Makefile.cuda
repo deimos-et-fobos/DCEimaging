@@ -1,0 +1,20 @@
+.SUFFIXES: .cpp .cu .o
+
+LIBS=
+LIBDIR=
+OBJS=fft_cuda.o complex.o
+NVCCFLAGS= -g -c -dc
+NVCC=$(CUDA_PATH)/bin/nvcc
+
+.cpp.o: 
+	$(NVCC) $(NVCCFLAGS) $<
+
+.cu.o: 
+	$(NVCC) $(NVCCFLAGS) $<
+
+all: $(OBJS) 
+
+clean: 
+		rm -f *~ *.o *.out
+
+wipe: clean

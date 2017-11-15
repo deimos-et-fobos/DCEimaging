@@ -13,6 +13,7 @@
 template <typename T> void writeToBinary(const char *filename, T *data, int ndata, int *sizes, int dim);
 template <typename T> void readFromBinary(const char *filename, T **data, int *ndata, int **sizes, int *dim);
 template <typename T> T norm(T *vec, int n);
+template <typename T> T SSQ(T *vec, int n);
 void solveNLLSQ(float *J, float *dCt, float *dB, int npoints, int nparams);
 void gaussSolver(float *A,float *b, float *x, int n);
 
@@ -92,11 +93,11 @@ int main(void){
     //for(int j=239;j<278;j++){
       for(int k=0;k<mriSizes[2];k++){
       //for(int k=10;k<11;k++){
-				//printf("Voxel(%d,%d,%d)\n",i,j,k);
+				printf("Voxel(%d,%d,%d)\n",i,j,k);
         /* Initial parameters */
         int param_offset = k*mriSizes[0]*mriSizes[1] + j*mriSizes[0] + i;
         int data_offset = param_offset*nt;
-        float vp0=0.1,ktrans0=0.3/60,kep0=0.3/60;
+        float vp0=0.5,ktrans0=0.1/60,kep0=0.1/60;
         Ct.getDataValues(data_offset,1,mriSizes[3],Ct_i,0,1);		/* Ct data of voxel(i,j,k) */
         for(int l=0;l<mriSizes[3];l++)
           Exp[l] = exp(-kep0*time[l]);				/* Exponential function */
@@ -111,16 +112,16 @@ int main(void){
           Ct_n[l] = vp0*Cp_re[l] + ktrans0*integral[l];	/* Ct numerical approximation */
           dCt[l] = Ct_i[l] - Ct_n[l];						/* Diference between Ct_i and Ct_n */
         }
-        float r_old = norm(dCt,nt);
+        float r_old = SSQ(dCt,nt);
   
         /* Non-Liniear Least Square Method */
   			int its = 0;
         float dB[NPARAMS]={1e10,1e10,1e10};
 				float beta[NPARAMS]={vp0,ktrans0,kep0};  		/* SHOULD CHANGE IF NPARAMS CHANGE */
 				float beta_min[NPARAMS]={vp0,ktrans0,kep0};	/* SHOULD CHANGE IF NPARAMS CHANGE */
-        float dr=1e10;
+        float dr,dr_rel=1e10,dB_rel=1;
         float r_min=1e10,r_new;
-        while( its<MAXIT && (norm(dB,NPARAMS)>1e-6||dr>1e-3) && kep0>1e-9 ){        
+				while( its<MAXIT && (norm(dB,NPARAMS)>1e-3||(dr_rel)>1e-3||r_old==0.0) && kep0>1e-9 ){
           its++;
           for(int l=0;l<mriSizes[3];l++)
             Exp[l] *= time[l];
@@ -137,33 +138,66 @@ int main(void){
 							//printf("%f %f %f %f\n",J[l],J[nt+l],J[2*nt+l],dCt[l]);
           }
           solveNLLSQ(J,dCt,dB,nt,NPARAMS);
+					dB_rel = 0;
 					for(int i=0;i<NPARAMS;i++){
           	if((beta[i]+dB[i])<0)
             	dB[i] = -3.0/4.0*beta[i];      
-						beta[i] += dB[i];
+//						beta[i] += dB[i];
 					} 
-          vp0 = beta[0];
-          ktrans0 = beta[1];
-          kep0 = beta[2];
-	
-          for(int l=0;l<mriSizes[3];l++)
-            Exp[l] = exp(-kep0*time[l]);
-          CFFT::Forward(Exp,fftExp,NX);
-          for(int l=0;l<NX;l++)
-            fftExp[l] *= fftCp[l];
-          CFFT::Inverse(fftExp,convol,NX);
-          for(int l=0;l<mriSizes[3];l++){
-            integral[l] = convol[l].re()*difft;
-            Ct_n[l] = vp0*Cp_re[l] + ktrans0*integral[l];
-            dCt[l] = Ct_i[l] - Ct_n[l];
-          }
-          r_new = norm(dCt,nt);
-          if(r_new<r_min){
-            r_min=r_new;
-						for(int i=0;i<NPARAMS;i++)
-            	beta_min[i] = beta[i];
-          }  
-          dr = fabs(r_new-r_old)/r_new;
+//          vp0 = beta[0];
+//          ktrans0 = beta[1];
+//          kep0 = beta[2];
+			
+					if(isnan(beta[0])||isnan(beta[1])||isnan(beta[2])){
+						beta_min[0] = 0;
+	          beta_min[1] = 0;
+  	        beta_min[2] = 0;
+    	      r_min = SSQ(Ct_i,nt);
+      	    break;
+       	 	}
+/**/
+	        int flag = 1,sub_it=0;
+  	      while(flag && sub_it<5){
+    	      sub_it++;
+      		  vp0 = beta[0]+dB[0];
+          	ktrans0 = beta[1]+dB[1];
+          	kep0 = beta[2]+dB[2];
+          	if(ktrans0<1e-6) kep0=1e-6;
+          	if(kep0>1) kep0=0.1/60;
+/**/
+	          for(int l=0;l<mriSizes[3];l++)
+  	          Exp[l] = exp(-kep0*time[l]);
+    	      CFFT::Forward(Exp,fftExp,NX);
+      	    for(int l=0;l<NX;l++)
+        	    fftExp[l] *= fftCp[l];
+          	CFFT::Inverse(fftExp,convol,NX);
+	          for(int l=0;l<mriSizes[3];l++){
+  	          integral[l] = convol[l].re()*difft;
+    	        Ct_n[l] = vp0*Cp_re[l] + ktrans0*integral[l];
+      	      dCt[l] = Ct_i[l] - Ct_n[l];
+        	  }
+          	r_new = SSQ(dCt,nt);
+
+	          if(r_new>r_old){
+							for(int i=0;i<NPARAMS;i++)
+            		dB[i] /= 2;
+          	}else
+					  	flag=0;
+					}
+					dB_rel = 0;
+	        for(int i=0;i<NPARAMS;i++){
+  	        beta[i] += dB[i];
+    	      dB_rel += fabs(dB[i]/beta[i]);
+      	  }
+					if(r_new<r_min){
+          	r_min=r_new;
+	          for(int i=0;i<NPARAMS;i++)
+  	          beta_min[i] = beta[i];
+    	    } 
+      	  dr_rel = dr = fabs(r_old-r_new);
+        	if(r_old>1e-6)
+          	dr_rel /= r_old;
+
 					//printf("%f %f %f %f %f %f\n",dr,r_new,norm(dB,NPARAMS),beta[0],beta[1],beta[2]);
 					//getchar();
           r_old = r_new;
@@ -198,6 +232,14 @@ T norm(T *vec, int n){
   for(int i=0;i<n;i++)
     norm += vec[i]*vec[i];
   return sqrt(norm);
+}
+
+template <typename T>
+T SSQ(T *vec, int n){
+  T S = 0;
+  for(int i=0;i<n;i++)
+    S += vec[i]*vec[i];
+  return S;
 }
 
 void solveNLLSQ(float *J, float *dCt, float *dB, int npoints, int nparams){
@@ -257,16 +299,16 @@ void gaussSolver(float *A,float *b, float *x, int n){
       rhs[pivot] = aux;
     }
     if(fabs(m[i][i])<tol){
-			if(i!=0){		/* Arreglo casero cuando kep muy grande */
-				for(int k=0;k<n-1;k++){
-					m[k][i]=0;			
-				}
-				m[i][i]=1;
-			}
-			else{
+//			if(i!=0){		/* Arreglo casero cuando kep muy grande */
+//				for(int k=0;k<n-1;k++){
+//					m[k][i]=0;			
+//				}
+//				m[i][i]=1;
+//			}
+//			else{
       	printf("Pivot ~ 0 en solver3x3().");
       	assert(0);
-			}
+//			}
     }
     
     /* Reducción */

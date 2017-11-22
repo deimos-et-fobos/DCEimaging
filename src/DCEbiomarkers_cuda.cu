@@ -44,6 +44,7 @@ int main(void){
 	int nVoxels = 1;
 	for(int i=0;i<nsd;i++)
   	nVoxels *= mriSizes[i];							/* Number of MRI voxels */
+ 	int nPixels = nVoxels/mriSizes[nsd-1];/* Number of pixels per MRI Slice */
   float *Ct_aux = new float[nVoxels*nt];/* Here will be reordered C_t */
   float difft = (time[nt-1]-time[0])/(nt-1);	/* Average temporary step */
 
@@ -118,13 +119,13 @@ int main(void){
 	err = cudaMalloc((void**)&dev_time, nt*sizeof(float));
 	err = cudaMalloc((void**)&dev_AIF,nt*sizeof(float));
 	err = cudaMalloc((void**)&dev_mriSizes,(nsd+1)*sizeof(int));
-	err = cudaMalloc((void**)&dev_Ct, nVoxels*nt*sizeof(float));
-	err = cudaMalloc((void**)&dev_vp, nVoxels*sizeof(float));
-	err = cudaMalloc((void**)&dev_ktrans, nVoxels*sizeof(float));
-	err = cudaMalloc((void**)&dev_kep, nVoxels*sizeof(float));
-	err = cudaMalloc((void**)&dev_converged, nVoxels*sizeof(float));
-	err = cudaMalloc((void**)&dev_iter, nVoxels*sizeof(float));
-	err = cudaMalloc((void**)&dev_res, nVoxels*sizeof(float));
+	err = cudaMalloc((void**)&dev_Ct, nPixels*nt*sizeof(float));
+	err = cudaMalloc((void**)&dev_vp, nPixels*sizeof(float));
+	err = cudaMalloc((void**)&dev_ktrans, nPixels*sizeof(float));
+	err = cudaMalloc((void**)&dev_kep, nPixels*sizeof(float));
+	err = cudaMalloc((void**)&dev_converged, nPixels*sizeof(float));
+	err = cudaMalloc((void**)&dev_iter, nPixels*sizeof(float));
+	err = cudaMalloc((void**)&dev_res, nPixels*sizeof(float));
 	err = cudaMalloc((void**)&dev_Cp, NX*sizeof(complex));
 	err = cudaMalloc((void**)&dev_fftCp, NX*sizeof(complex));
 	if ( err != cudaSuccess){
@@ -146,11 +147,6 @@ int main(void){
 	err = cudaMemcpy(dev_time,time,nt*sizeof(float),cudaMemcpyHostToDevice);
 	err = cudaMemcpy(dev_AIF,Cp_re,nt*sizeof(float),cudaMemcpyHostToDevice);
 	err = cudaMemcpy(dev_mriSizes,mriSizes,(nsd+1)*sizeof(int),cudaMemcpyHostToDevice);
-	err = cudaMemcpy(dev_Ct,Ct.getDataPointer(),nVoxels*nt*sizeof(float),cudaMemcpyHostToDevice);
-	err = cudaMemcpy(dev_vp,vp.getDataPointer(),nVoxels*sizeof(float),cudaMemcpyHostToDevice);
-	err = cudaMemcpy(dev_ktrans,ktrans.getDataPointer(),nVoxels*sizeof(float),cudaMemcpyHostToDevice);
-	err = cudaMemcpy(dev_kep,kep.getDataPointer(),nVoxels*sizeof(float),cudaMemcpyHostToDevice);
-	err = cudaMemcpy(dev_converged,converged.getDataPointer(),nVoxels*sizeof(float),cudaMemcpyHostToDevice);
 	err = cudaMemcpy(dev_Cp,Cp,NX*sizeof(complex),cudaMemcpyHostToDevice);
 	err = cudaMemcpy(dev_fftCp,fftCp,NX*sizeof(complex),cudaMemcpyHostToDevice);
 	if ( err != cudaSuccess){
@@ -189,10 +185,22 @@ int main(void){
 	}
  	printf("|* Cuda Thread Limit Malloc Heap Size = %lluMB\n",(heapSize/1024)/1024);
 	for(int i=0;i<mriSizes[2]/grid.z;i++){
-	//for(int i=23;i<24;i++){
+		int pOffset = nPixels*i;
+		err = cudaMemcpy(dev_Ct,Ct.getDataPointer()+pOffset*nt,nPixels*nt*sizeof(float),cudaMemcpyHostToDevice);
+		err = cudaMemcpy(dev_vp,vp.getDataPointer()+pOffset,nPixels*sizeof(float),cudaMemcpyHostToDevice);
+		err = cudaMemcpy(dev_ktrans,ktrans.getDataPointer()+pOffset,nPixels*sizeof(float),cudaMemcpyHostToDevice);
+		err = cudaMemcpy(dev_kep,kep.getDataPointer()+pOffset,nPixels*sizeof(float),cudaMemcpyHostToDevice);
+		err = cudaMemcpy(dev_converged,converged.getDataPointer()+pOffset,nPixels*sizeof(float),cudaMemcpyHostToDevice);
 		NLLSQkernel<<<grid,block>>>(nsd,nt,dev_mriSizes,difft,dev_Ct,dev_time,dev_AIF,
 																dev_Cp,dev_fftCp,dev_vp,dev_ktrans,dev_kep,dev_converged,
 																dev_iter,dev_res,i);
+		err = cudaMemcpy(vp.getDataPointer()+pOffset,dev_vp,nPixels*sizeof(float),cudaMemcpyDeviceToHost);
+		err = cudaMemcpy(ktrans.getDataPointer()+pOffset,dev_ktrans,nPixels*sizeof(float),cudaMemcpyDeviceToHost);
+		err = cudaMemcpy(kep.getDataPointer()+pOffset,dev_kep,nPixels*sizeof(float),cudaMemcpyDeviceToHost);
+		err = cudaMemcpy(converged.getDataPointer()+pOffset,dev_converged,nPixels*sizeof(float),cudaMemcpyDeviceToHost);
+		err = cudaMemcpy(iter.getDataPointer()+pOffset,dev_iter,nPixels*sizeof(float),cudaMemcpyDeviceToHost);
+		err = cudaMemcpy(res.getDataPointer()+pOffset,dev_res,nPixels*sizeof(float),cudaMemcpyDeviceToHost);
+		err = cudaMemcpy(CtN.getDataPointer()+pOffset*nt,dev_Ct,nPixels*nt*sizeof(float),cudaMemcpyDeviceToHost);
 		if( (err=cudaDeviceSynchronize()) != cudaSuccess){
 			printf("err = %d\n",err);
  			fprintf(stderr, "Cuda error: Failed to synchronize\n");
@@ -220,13 +228,6 @@ int main(void){
 	/* Copy data from device to host */
 	/*********************************/
 	printf("* Copying data to host...\n");
-	err = cudaMemcpy(vp.getDataPointer(),dev_vp,nVoxels*sizeof(float),cudaMemcpyDeviceToHost);
-	err = cudaMemcpy(ktrans.getDataPointer(),dev_ktrans,nVoxels*sizeof(float),cudaMemcpyDeviceToHost);
-	err = cudaMemcpy(kep.getDataPointer(),dev_kep,nVoxels*sizeof(float),cudaMemcpyDeviceToHost);
-	err = cudaMemcpy(converged.getDataPointer(),dev_converged,nVoxels*sizeof(float),cudaMemcpyDeviceToHost);
-	err = cudaMemcpy(iter.getDataPointer(),dev_iter,nVoxels*sizeof(float),cudaMemcpyDeviceToHost);
-	err = cudaMemcpy(res.getDataPointer(),dev_res,nVoxels*sizeof(float),cudaMemcpyDeviceToHost);
-	err = cudaMemcpy(CtN.getDataPointer(),dev_Ct,nVoxels*nt*sizeof(float),cudaMemcpyDeviceToHost);
 	if ( err != cudaSuccess){ 
     fprintf(stderr, "Cuda error: Failed to copy data\n");
     return 0;
@@ -485,7 +486,7 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
 	    /**********************/
       /* Initial parameters */
 	    /**********************/
-      int param_offset = pz*mriSizes[0]*mriSizes[1] + py*mriSizes[0] + px;
+      int param_offset = py*mriSizes[0] + px;
       int data_offset = param_offset*nt;
       float vp0=0.5,ktrans0=0.1/60,kep0=0.1/60;
       for(int l=0;l<nt;l++){
@@ -643,8 +644,8 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
 			  return;
 		  }
   */
-		if(param_offset>=mriSizes[0]*mriSizes[1]*mriSizes[2]){
-			printf("param_offset = %d, max = %d",param_offset,mriSizes[0]*mriSizes[1]*mriSizes[2]);
+		if(param_offset>=mriSizes[0]*mriSizes[1]){
+			printf("param_offset = %d, max = %d",param_offset,mriSizes[0]*mriSizes[1]);
 			assert(0);
 		}
 //	 	printf("Voxels(%d,%d,%d)... its: %d\n",px+1,py+1,pz+1,its);

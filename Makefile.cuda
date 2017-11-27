@@ -1,0 +1,13 @@
+export $(DEBUG)
+export $(ARCH)
+
+all: 
+	(cd src; make -f Makefile.cuda)
+
+wipe: 
+		(cd src; make -f Makefile.cuda wipe)
+
+remake: 
+	(cd src; make -f Makefile.cuda remake)
+
+clean: wipe 

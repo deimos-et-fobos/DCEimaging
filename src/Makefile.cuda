@@ -5,33 +5,65 @@ PROGRAM=DCEbiomarkers_cuda
 
 PROG=$(BIN_DIR)$(PROGRAM)
 
-OBJS=DCEbiomarkers_cuda.o
+OBJS=cfgreading.o DCEbiomarkers_cuda.o
 FFTDIR=FFT_CODE/
-FFTOBJS=$(FFTDIR)complex.o $(FFTDIR)fft_cuda.o
+FFTOBJS=complex.o fft_cuda.o
 LIBS=
 LIBDIR=
-NVCCFLAGS= -g -c -dc
-NVCC=$(CUDA_PATH)/bin/nvcc
+NVCC ?= $(CUDA_PATH)/bin/nvcc
+DEBUG ?= 0
+ifneq ($(DEBUG),0)
+GDB=-g
+NVCCFLAGS=$(GDB) -dc
+else
+OPT=-O3
+NVCCFLAGS=$(OPT) -dc
+endif
+export NVCC
+export NVCCFLAGS
+
+################################################################################
+
+ARCH ?= -arch=sm_30
+
+# Gencode arguments
+SMS ?= 30 35 37 50 52 60 61
+
+# Generate SASS code for each SM architecture listed in $(SMS)
+$(foreach sm,$(SMS),$(eval GENCODE_FLAGS += -gencode arch=compute_$(sm),code=sm_$(sm)))
+
+# Generate PTX code from the highest SM architecture in $(SMS) to guarantee forward-compatibility
+HIGHEST_SM := $(lastword $(sort $(SMS)))
+ifneq ($(HIGHEST_SM),)
+GENCODE_FLAGS += -gencode arch=compute_$(HIGHEST_SM),code=compute_$(HIGHEST_SM)
+endif
+
+export ARCH
+export GENCODE_FLAGS
+
+################################################################################
 
 .cpp.o:
-	$(NVCC) $(NVCCFLAGS) $<
+	$(NVCC) -c $(NVCCFLAGS) $(ARCH) $(GENCODE_FLAGS) $<
 
 .c.o:
-	$(NVCC) $(NVCCFLAGS) $<
+	$(NVCC) -c $(NVCCFLAGS) $(ARCH) $(GENCODE_FLAGS) $<
 
 .cu.o:
-	$(NVCC) $(NVCCFLAGS) $<
+	$(NVCC) -c $(NVCCFLAGS) $(ARCH) $(GENCODE_FLAGS) $<
 
 all: $(PROGRAM)
 
-$(PROGRAM): $(FFTOBJS) FFTsrc $(OBJS)
-	$(NVCC) -g -o $(PROG) $(OBJS) $(FFTOBJS) $(LIBDIR)$(LIBS)
+$(PROGRAM): FFTsrc $(FFTOBJS) $(OBJS)
+	$(NVCC) $(GDB)$(OPT) $(ARCH) $(GENCODE_FLAGS) $(OBJS) $(FFTOBJS) $(LIBDIR)$(LIBS) -o $(PROG) 
 
 FFTsrc:
-	(cd $(FFTDIR); make -f Makefile.cuda)
+	(cd $(FFTDIR); make -f Makefile.cuda; cp *.o $(CURDIR)/)
 
 clean: 
 		rm -f $(PROG) *~ *.o *.out
 
 wipe: clean
 		(cd $(FFTDIR); make -f Makefile.cuda clean)
+
+remake: wipe all

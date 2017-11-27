@@ -1,3 +1,6 @@
+bin
+DCEbiomarkers_orig.cpp
+
 # ignore all .o files in the subdirectory/ directory
 subdirectory/**/*.o
 

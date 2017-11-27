@@ -3,14 +3,15 @@
 LIBS=
 LIBDIR=
 OBJS=fft_cuda.o complex.o
-NVCCFLAGS= -g -c -dc
-NVCC=$(CUDA_PATH)/bin/nvcc
+#NVCCFLAGS= -c -dc
+#NVCCFLAGS= -g -c -dc
+#NVCC=$(CUDA_PATH)/bin/nvcc
 
 .cpp.o: 
-	$(NVCC) $(NVCCFLAGS) $<
+	$(NVCC) -c $(NVCCFLAGS) $(ARCH) $(GENCODE_FLAGS) $<
 
 .cu.o: 
-	$(NVCC) $(NVCCFLAGS) $<
+	$(NVCC) -c $(NVCCFLAGS) $(ARCH) $(GENCODE_FLAGS) $<
 
 all: $(OBJS) 
 

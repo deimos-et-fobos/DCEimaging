@@ -9,10 +9,21 @@
 #include "matrix.h"
 #include "FFT_CODE/fft.h"
 #include "FFT_CODE/complex.h"
+#include "cfgreading.h"
 
 #define NX 64
 #define MAXIT 200
 #define NPARAMS 3
+
+/* Default values */
+#define THREADSPERBLOCK_X 8
+#define THREADSPERBLOCK_Y 8
+#define THREADSPERBLOCK_Z 1
+#define BLOCKSPERGRID_X 64
+#define BLOCKSPERGRID_Y 64
+#define BLOCKSPERGRID_Z 1
+#define HEAPSIZEFACTOR 8
+#define STACKSIZEFACTOR 8
 
 template <typename T> void writeToBinary(const char *filename, T *data, int ndata, int *sizes, int dim);
 template <typename T> void readFromBinary(const char *filename, T **data, int *ndata, int **sizes, int *dim);
@@ -22,16 +33,28 @@ __device__ void solveNLLSQ(float *J, float *dCt, float *dB, int npoints);
 __device__ void gaussSolver(float *A,float *b, float *x);
 __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *Ct, float *t, float *AIF, 
 								complex *Cp_g, complex *fftCp_g, float *vp, float *ktrans, float *kep, float *converged,
-								float *iter, float *res, int zlayer);
+								float *iter, float *res, dim3 gridIdx);
+__host__ int checkInitErrors(dim3 threadsPerBlock, dim3 blocksPerGrid, int mri_zdim, int nt);
 
 int main(void){
 	float mainTime=0;
   cudaError_t err = cudaSuccess;				// Error code to check return values for CUDA calls
 	size_t free,total,heapSize,stackSize;
+	dim3 threadsPerBlock(THREADSPERBLOCK_X,THREADSPERBLOCK_Y,THREADSPERBLOCK_Z);
+	dim3 blocksPerGrid(BLOCKSPERGRID_X,BLOCKSPERGRID_Y,BLOCKSPERGRID_Z);
+	float stackSizeFactor = STACKSIZEFACTOR;
+	float heapSizeFactor = HEAPSIZEFACTOR;
+	char cfgfile[]="DCEimaging.cfg";
 	cudaEvent_t mainStart, mainStop;
 	err = cudaEventCreate(&mainStart);
 	err = cudaEventCreate(&mainStop);
 	err = cudaEventRecord(mainStart, 0);
+
+	/* Reading configuration file */
+  cfgreading(cfgfile,&threadsPerBlock,&blocksPerGrid,&stackSizeFactor,&heapSizeFactor);
+
+	/* Check errors in the GPU initilized variables */
+	if(checkInitErrors(threadsPerBlock,blocksPerGrid,0,0)) return 0;
 
 	printf("* Reading data...\n");
 	matrix<float> t("t.dat");							/* Read t */
@@ -44,9 +67,16 @@ int main(void){
 	int nVoxels = 1;
 	for(int i=0;i<nsd;i++)
   	nVoxels *= mriSizes[i];							/* Number of MRI voxels */
- 	int nPixels = nVoxels/mriSizes[nsd-1];/* Number of pixels per MRI Slice */
   float *Ct_aux = new float[nVoxels*nt];/* Here will be reordered C_t */
   float difft = (time[nt-1]-time[0])/(nt-1);	/* Average temporary step */
+
+	/**************************************************/
+	/* Number of threads, blocks and grids per Kernel */	
+	/**************************************************/
+	/* Check that mriSizes[2] is multiple of (threadsPerBlock.z*blocksPerGrid.z) */
+	if(checkInitErrors(threadsPerBlock,blocksPerGrid,mriSizes[2],nt)) return 0;
+	dim3 gridsPerKernel(1+(mriSizes[0]-1)/(threadsPerBlock.x*blocksPerGrid.x),1+(mriSizes[1]-1)/(threadsPerBlock.y*blocksPerGrid.y),mriSizes[2]/(threadsPerBlock.z*blocksPerGrid.z));
+	int sliceVoxels = nVoxels/gridsPerKernel.z; 	// Number of voxels per MRI slice
 
 	/****************************************************/
   /* Reordering of C_t data. 													*/
@@ -63,13 +93,6 @@ int main(void){
     }
   }
 	Ct.setData(Ct_aux);	/* Copy the C_t reordered to Ct */
-  
-  /* Test with any voxel */
-/*  int px=248,py=275,pz=11;
-  for(int i=0;i<mriSizes[3];i++){
-    int idx= i*512*512*24 + (pz-1)*512*512 + (py-1)*512 + (px-1);
-    printf("%f %f %f\n",time[i],AIF.data[i],Ct.data[idx]);
-  }  */
 
 	/******************************************************/ 
   /* Alloc memory for vp, ktrans, kep y other variables */
@@ -89,8 +112,6 @@ int main(void){
   for(int i=0;i<nt;i++)
     Cp[i] = Cp_re[i] = AIF.getDataValue(i);				/* Copy AIF to the real part of Cp */ 
   CFFT::Forward(Cp,fftCp,NX); 										/* FFT of Cp */
-/*  for(int i=0;i<NX;i++)  
-    printf("%f %f %f %f\n",Cp[i].re(),Cp_re[i],fftCp[i].re(),fftCp[i].im()); */
 
 	/*****************************/
 	/* Allocate memory in device */
@@ -119,13 +140,13 @@ int main(void){
 	err = cudaMalloc((void**)&dev_time, nt*sizeof(float));
 	err = cudaMalloc((void**)&dev_AIF,nt*sizeof(float));
 	err = cudaMalloc((void**)&dev_mriSizes,(nsd+1)*sizeof(int));
-	err = cudaMalloc((void**)&dev_Ct, nPixels*nt*sizeof(float));
-	err = cudaMalloc((void**)&dev_vp, nPixels*sizeof(float));
-	err = cudaMalloc((void**)&dev_ktrans, nPixels*sizeof(float));
-	err = cudaMalloc((void**)&dev_kep, nPixels*sizeof(float));
-	err = cudaMalloc((void**)&dev_converged, nPixels*sizeof(float));
-	err = cudaMalloc((void**)&dev_iter, nPixels*sizeof(float));
-	err = cudaMalloc((void**)&dev_res, nPixels*sizeof(float));
+	err = cudaMalloc((void**)&dev_Ct, sliceVoxels*nt*sizeof(float));
+	err = cudaMalloc((void**)&dev_vp, sliceVoxels*sizeof(float));
+	err = cudaMalloc((void**)&dev_ktrans, sliceVoxels*sizeof(float));
+	err = cudaMalloc((void**)&dev_kep, sliceVoxels*sizeof(float));
+	err = cudaMalloc((void**)&dev_converged, sliceVoxels*sizeof(float));
+	err = cudaMalloc((void**)&dev_iter, sliceVoxels*sizeof(float));
+	err = cudaMalloc((void**)&dev_res, sliceVoxels*sizeof(float));
 	err = cudaMalloc((void**)&dev_Cp, NX*sizeof(complex));
 	err = cudaMalloc((void**)&dev_fftCp, NX*sizeof(complex));
 	if ( err != cudaSuccess){
@@ -163,13 +184,16 @@ int main(void){
 	err = cudaEventCreate(&stop);
 	err = cudaEventRecord(start, 0);
   printf("* Kernel execution...\n");  
-	dim3 block(8,8);
-	dim3 grid(mriSizes[0]/block.x,mriSizes[1]/block.y,1);
-	if(cudaThreadSetLimit(cudaLimitStackSize,8*stackSize)){
+	dim3 gridIdx(0,0,0);
+ 	printf("|\\\n");
+	printf("|* Threads per block: (%d,%d,%d)\n",threadsPerBlock.x,threadsPerBlock.y,threadsPerBlock.z);
+	printf("|* Blocks per grid: (%d,%d,%d)\n",blocksPerGrid.x,blocksPerGrid.y,blocksPerGrid.z);
+	printf("|* Grids per kernel: (%d,%d,%d)\n",gridsPerKernel.x,gridsPerKernel.y,gridsPerKernel.z);
+	if(cudaThreadSetLimit(cudaLimitStackSize,stackSizeFactor*stackSize)){
    	fprintf(stderr, "Cuda error: Failed to get Thread Limit Stack Size\n");
    	return 0;
 	} 
-	if(cudaThreadSetLimit(cudaLimitMallocHeapSize,4*heapSize)){
+	if(cudaThreadSetLimit(cudaLimitMallocHeapSize,heapSizeFactor*heapSize)){
    	fprintf(stderr, "Cuda error: Failed to get Thread Limit Malloc Heap Size\n");
    	return 0;
 	}
@@ -177,39 +201,44 @@ int main(void){
   	fprintf(stderr, "Cuda error: Failed to get Thread Limit Stack Size\n");
    	return 0;
 	}
- 	printf("|\\\n");
 	printf("|* Cuda Thread Limit Stack Size = %lluKB\n",stackSize/1024);
 	if(cudaThreadGetLimit(&heapSize,cudaLimitMallocHeapSize)){
    	fprintf(stderr, "Cuda error: Failed to get Thread Limit Malloc Heap Size\n");
    	return 0;
 	}
  	printf("|* Cuda Thread Limit Malloc Heap Size = %lluMB\n",(heapSize/1024)/1024);
-	for(int i=0;i<mriSizes[2]/grid.z;i++){
-		int pOffset = nPixels*i;
-		err = cudaMemcpy(dev_Ct,Ct.getDataPointer()+pOffset*nt,nPixels*nt*sizeof(float),cudaMemcpyHostToDevice);
-		err = cudaMemcpy(dev_vp,vp.getDataPointer()+pOffset,nPixels*sizeof(float),cudaMemcpyHostToDevice);
-		err = cudaMemcpy(dev_ktrans,ktrans.getDataPointer()+pOffset,nPixels*sizeof(float),cudaMemcpyHostToDevice);
-		err = cudaMemcpy(dev_kep,kep.getDataPointer()+pOffset,nPixels*sizeof(float),cudaMemcpyHostToDevice);
-		err = cudaMemcpy(dev_converged,converged.getDataPointer()+pOffset,nPixels*sizeof(float),cudaMemcpyHostToDevice);
-		NLLSQkernel<<<grid,block>>>(nsd,nt,dev_mriSizes,difft,dev_Ct,dev_time,dev_AIF,
-																dev_Cp,dev_fftCp,dev_vp,dev_ktrans,dev_kep,dev_converged,
-																dev_iter,dev_res,i);
-		err = cudaMemcpy(vp.getDataPointer()+pOffset,dev_vp,nPixels*sizeof(float),cudaMemcpyDeviceToHost);
-		err = cudaMemcpy(ktrans.getDataPointer()+pOffset,dev_ktrans,nPixels*sizeof(float),cudaMemcpyDeviceToHost);
-		err = cudaMemcpy(kep.getDataPointer()+pOffset,dev_kep,nPixels*sizeof(float),cudaMemcpyDeviceToHost);
-		err = cudaMemcpy(converged.getDataPointer()+pOffset,dev_converged,nPixels*sizeof(float),cudaMemcpyDeviceToHost);
-		err = cudaMemcpy(iter.getDataPointer()+pOffset,dev_iter,nPixels*sizeof(float),cudaMemcpyDeviceToHost);
-		err = cudaMemcpy(res.getDataPointer()+pOffset,dev_res,nPixels*sizeof(float),cudaMemcpyDeviceToHost);
-		err = cudaMemcpy(CtN.getDataPointer()+pOffset*nt,dev_Ct,nPixels*nt*sizeof(float),cudaMemcpyDeviceToHost);
-		if( (err=cudaDeviceSynchronize()) != cudaSuccess){
-			printf("err = %d\n",err);
- 			fprintf(stderr, "Cuda error: Failed to synchronize\n");
- 			return 0;
+	for(int k=0;k<gridsPerKernel.z;k++){
+		gridIdx.z = k;
+		int pOffset = sliceVoxels*k;
+		err = cudaMemcpy(dev_Ct,Ct.getDataPointer()+pOffset*nt,sliceVoxels*nt*sizeof(float),cudaMemcpyHostToDevice);
+		err = cudaMemcpy(dev_vp,vp.getDataPointer()+pOffset,sliceVoxels*sizeof(float),cudaMemcpyHostToDevice);
+		err = cudaMemcpy(dev_ktrans,ktrans.getDataPointer()+pOffset,sliceVoxels*sizeof(float),cudaMemcpyHostToDevice);
+		err = cudaMemcpy(dev_kep,kep.getDataPointer()+pOffset,sliceVoxels*sizeof(float),cudaMemcpyHostToDevice);
+		err = cudaMemcpy(dev_converged,converged.getDataPointer()+pOffset,sliceVoxels*sizeof(float),cudaMemcpyHostToDevice);
+		for(int i=0;i<gridsPerKernel.x;i++){
+			gridIdx.x = i;
+			for(int j=0;j<gridsPerKernel.y;j++){
+				gridIdx.y = j;
+				NLLSQkernel<<<blocksPerGrid,threadsPerBlock>>>(nsd,nt,dev_mriSizes,difft,dev_Ct,dev_time,dev_AIF,
+										dev_Cp,dev_fftCp,dev_vp,dev_ktrans,dev_kep,dev_converged,dev_iter,dev_res,gridIdx);
+			}
+			if( (err=cudaDeviceSynchronize()) != cudaSuccess){
+				printf("err = %d\n",err);
+ 				fprintf(stderr, "Cuda error: Failed to synchronize\n");
+ 				return 0;
+			}
 		}
+		err = cudaMemcpy(vp.getDataPointer()+pOffset,dev_vp,sliceVoxels*sizeof(float),cudaMemcpyDeviceToHost);
+		err = cudaMemcpy(ktrans.getDataPointer()+pOffset,dev_ktrans,sliceVoxels*sizeof(float),cudaMemcpyDeviceToHost);
+		err = cudaMemcpy(kep.getDataPointer()+pOffset,dev_kep,sliceVoxels*sizeof(float),cudaMemcpyDeviceToHost);
+		err = cudaMemcpy(converged.getDataPointer()+pOffset,dev_converged,sliceVoxels*sizeof(float),cudaMemcpyDeviceToHost);
+		err = cudaMemcpy(iter.getDataPointer()+pOffset,dev_iter,sliceVoxels*sizeof(float),cudaMemcpyDeviceToHost);
+		err = cudaMemcpy(res.getDataPointer()+pOffset,dev_res,sliceVoxels*sizeof(float),cudaMemcpyDeviceToHost);
+		err = cudaMemcpy(CtN.getDataPointer()+pOffset*nt,dev_Ct,sliceVoxels*nt*sizeof(float),cudaMemcpyDeviceToHost);
 		err = cudaEventRecord(stop, 0);
 		err = cudaEventSynchronize(stop);
 		err = cudaEventElapsedTime(&elapsed, start, stop);
-		printf("|* [NLLSQkernel  %d] The elapsed time in gpu was %.2f s.\n",i+1,elapsed/1000);
+		printf("|* [NLLSQkernel (:,:,%2d)] The elapsed time in gpu was %.2f s\n",k+1,elapsed/1000);
 	}
 	if(cudaMemGetInfo(&free,&total) != cudaSuccess){
 		fprintf(stderr, "Cuda error: Failed to get device memory info\n");
@@ -290,6 +319,8 @@ int main(void){
 	cudaFree(dev_ktrans);
 	cudaFree(dev_kep);
 	cudaFree(dev_converged);
+	cudaFree(dev_iter);
+	cudaFree(dev_res);
 	cudaFree(dev_Cp);
 	cudaFree(dev_fftCp);
 
@@ -438,12 +469,12 @@ void readFromBinary(const char *filename, T **data, int *ndata, int **sizes, int
 
 __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *Ct, float *t, float *AIF, 
 								complex *Cp_g, complex *fftCp_g, float *vp, float *ktrans, float *kep, float *converged,
-								float *iter, float *res, int zlayer){
+								float *iter, float *res, dim3 gridIdx){
 
-	int px = threadIdx.x+blockDim.x*blockIdx.x;
-	int py = threadIdx.y+blockDim.y*blockIdx.y;
-	//int pz = blockIdx.z;
-	int pz = zlayer*gridDim.z+blockIdx.z;
+	int px = threadIdx.x + blockDim.x*blockIdx.x + gridIdx.x*blockDim.x*gridDim.x;
+	int py = threadIdx.y + blockDim.y*blockIdx.y + gridIdx.y*blockDim.y*gridDim.y;
+	int pz = threadIdx.z + blockDim.z*blockIdx.z;
+	//int pz = threadIdx.z + blockDim.z*blockIdx.z + gridIdx.z*blockDim.z*gridDim.z;
 	if(px>=mriSizes[0]||py>=mriSizes[1]||pz>=mriSizes[2]) return;
 
   float *J = new float[NPARAMS*nt];					/* Jacobian for the NLLSQ method */
@@ -486,7 +517,7 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
 	    /**********************/
       /* Initial parameters */
 	    /**********************/
-      int param_offset = py*mriSizes[0] + px;
+      int param_offset = pz*mriSizes[0]*mriSizes[1] + py*mriSizes[0] + px;
       int data_offset = param_offset*nt;
       float vp0=0.5,ktrans0=0.1/60,kep0=0.1/60;
       for(int l=0;l<nt;l++){
@@ -519,7 +550,7 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
       float dB[NPARAMS]={1e10,1e10,1e10};
 	    float beta[NPARAMS]={vp0,ktrans0,kep0};  		/* SHOULD CHANGE IF NPARAMS CHANGE */
 	    float beta_min[NPARAMS]={vp0,ktrans0,kep0};	/* SHOULD CHANGE IF NPARAMS CHANGE */
-      float dr,dr_rel=1e10,dB_rel=1;
+      float dr_rel=1e10,dB_rel=1;
       float r_min=1e10,r_new;
       while( its<MAXIT && (norm(dB,NPARAMS)>1e-3||(dr_rel)>1e-3||r_old==0.0) && kep0>1e-9 ){        
      		its++;
@@ -616,14 +647,14 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
 			    for(int i=0;i<NPARAMS;i++)
           	beta_min[i] = beta[i];
         }  
-        dr_rel = dr = fabs(r_old-r_new);
+        dr_rel = fabs(r_old-r_new);
 				if(r_old>1e-6)
 					dr_rel /= r_old;
 /* 
 	if(px==313&&py==219&&pz==23){ 
 	 	printf("it: %d %f %f %f\n",its,dB[0],dB[1],dB[2]);
 	 	printf("it: %d %f %f %f\n",its,beta[0],beta[1],beta[2]);
-	 	printf("it: %d %f %f %f %f\n",its,r_old,r_new,dr,dr_rel);
+	 	printf("it: %d %f %f %f %f\n",its,r_old,r_new,dr_rel);
   }
 */
         r_old = r_new;
@@ -644,7 +675,7 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
 			  return;
 		  }
   */
-		if(param_offset>=mriSizes[0]*mriSizes[1]){
+		if(param_offset>=mriSizes[0]*mriSizes[1]*blockDim.z*gridDim.z){
 			printf("param_offset = %d, max = %d",param_offset,mriSizes[0]*mriSizes[1]);
 			assert(0);
 		}
@@ -668,4 +699,51 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
 	delete[] fftCp;
 
 	return;
+}
+
+int checkInitErrors(dim3 threadsPerBlock, dim3 blocksPerGrid, int mri_zdim, int nt){
+	int flag = 0;
+	cudaDeviceProp deviceProp;
+  cudaGetDeviceProperties(&deviceProp, 0);
+  if((threadsPerBlock.x*threadsPerBlock.y*threadsPerBlock.z)%deviceProp.warpSize){
+    printf("threadsPerBlock.x*threadsPerBlock.y*threadsPerBlock.z (%d x %d x %d = %d) must be divisible by the Warp Size (%d).\n",threadsPerBlock.x,threadsPerBlock.y,threadsPerBlock.z,threadsPerBlock.x*threadsPerBlock.y*threadsPerBlock.z,deviceProp.warpSize);
+    flag = 1;
+  }
+  if((threadsPerBlock.x*threadsPerBlock.y*threadsPerBlock.z)>deviceProp.maxThreadsPerBlock){
+    printf("threadsPerBlock.x*threadsPerBlock.y*threadsPerBlock.z (%d x %d x %d = %d) must be <= %d.\n",threadsPerBlock.x,threadsPerBlock.y,threadsPerBlock.z,threadsPerBlock.x*threadsPerBlock.y*threadsPerBlock.z,deviceProp.maxThreadsPerBlock);
+    flag = 1;
+  }
+  if(threadsPerBlock.x>deviceProp.maxThreadsDim[0]){
+    printf("threadsPerBlock.x (%d) must be <= %d.\n",threadsPerBlock.x,deviceProp.maxThreadsDim[0]);
+    flag = 1;
+  }
+  if(threadsPerBlock.y>deviceProp.maxThreadsDim[1]){
+    printf("threadsPerBlock.y (%d) must be <= %d.\n",threadsPerBlock.y,deviceProp.maxThreadsDim[1]);
+    flag = 1;
+  }
+  if(threadsPerBlock.z>deviceProp.maxThreadsDim[2]){
+    printf("threadsPerBlock.z (%d) must be <= %d.\n",threadsPerBlock.z,deviceProp.maxThreadsDim[2]);
+    flag = 1;
+  }
+  if(blocksPerGrid.x>deviceProp.maxGridSize[0]){
+    printf("blocksPerGrid.x (%d) must be <= %d.\n",blocksPerGrid.x,deviceProp.maxGridSize[0]);
+    flag = 1;
+  }
+  if(blocksPerGrid.y>deviceProp.maxGridSize[1]){
+    printf("blocksPerGrid.y (%d) must be <= %d.\n",blocksPerGrid.y,deviceProp.maxGridSize[1]);
+    flag = 1;
+  }
+  if(blocksPerGrid.z>deviceProp.maxGridSize[2]){
+    printf("blocksPerGrid.z (%d) must be <= %d.\n",blocksPerGrid.z,deviceProp.maxGridSize[2]);
+    flag = 1;
+  }
+	if(mri_zdim%(threadsPerBlock.z*blocksPerGrid.z)){
+		printf("MRI z-dimension (%d) must my multiple of threadsPerBlock.z*blocksPerGrid.z (%d)\n",mri_zdim,(threadsPerBlock.z*blocksPerGrid.z));	
+		flag = 1;
+	}
+	if(nt>NX){
+		printf("MRI time samples > fft vector lenght paramater (%d > %d)\n",nt,NX);	
+		flag = 1;
+	}
+	return flag;
 }

@@ -5,7 +5,7 @@ PROGRAM=DCEbiomarkers_cuda
 
 PROG=$(BIN_DIR)$(PROGRAM)
 
-OBJS=cfgreading.o DCEbiomarkers_cuda.o
+OBJS=DCEbiomarkers_cuda.o
 FFTDIR=FFT_CODE/
 FFTOBJS=complex.o fft_cuda.o
 LIBS=

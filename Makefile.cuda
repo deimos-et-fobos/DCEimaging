@@ -1,13 +1,5 @@
-export $(DEBUG)
-export $(ARCH)
+export DEBUG ?= 0
+export ARCH=-arch=$(arch)
 
-all: 
-	(cd src; make -f Makefile.cuda)
-
-wipe: 
-		(cd src; make -f Makefile.cuda wipe)
-
-remake: 
-	(cd src; make -f Makefile.cuda remake)
-
-clean: wipe 
+all wipe clean remake: 
+	(cd src; make -f Makefile.cuda $(MAKECMDGOALS))

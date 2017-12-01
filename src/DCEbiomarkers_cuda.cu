@@ -9,13 +9,10 @@
 #include "matrix.h"
 #include "FFT_CODE/fft.h"
 #include "FFT_CODE/complex.h"
-#include "cfgreading.h"
 
-#define NX 64
-#define MAXIT 200
-#define NPARAMS 3
-
+/******************/
 /* Default values */
+/******************/
 #define THREADSPERBLOCK_X 8
 #define THREADSPERBLOCK_Y 8
 #define THREADSPERBLOCK_Z 1
@@ -24,6 +21,10 @@
 #define BLOCKSPERGRID_Z 1
 #define HEAPSIZEFACTOR 8
 #define STACKSIZEFACTOR 8
+#define FFTLENGTH 64
+#define NLLSQMAXIT 200
+#define NPARAMS 3
+#include "cfgStr.h"
 
 template <typename T> void writeToBinary(const char *filename, T *data, int ndata, int *sizes, int dim);
 template <typename T> void readFromBinary(const char *filename, T **data, int *ndata, int **sizes, int *dim);
@@ -33,32 +34,35 @@ __device__ void solveNLLSQ(float *J, float *dCt, float *dB, int npoints);
 __device__ void gaussSolver(float *A,float *b, float *x);
 __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *Ct, float *t, float *AIF, 
 								complex *Cp_g, complex *fftCp_g, float *vp, float *ktrans, float *kep, float *converged,
-								float *iter, float *res, dim3 gridIdx);
-__host__ int checkInitErrors(dim3 threadsPerBlock, dim3 blocksPerGrid, int mri_zdim, int nt);
+								float *iter, float *res, dim3 gridIdx, int NLLSQMaxIt, int fftLength);
 
 int main(void){
+	/* cfgStr's constructor set default values */
+	cfgStr config;
+	/* Reading configuration file */
+	config.cfgRead("DCEimaging.cfg");
+	/* Check configuration errors */
+	if(config.checkCfgErrors()) return 0;
+	/* Initialization of local variables */
+	int NLLSQMaxIt = config.getNLLSQMaxIt();
+	float stackSizeFactor = config.getStackSizeFactor();
+	float heapSizeFactor = config.getHeapSizeFactor();
+	dim3 threadsPerBlock = config.getThreadsPerBlock();
+	dim3 blocksPerGrid = config.getBlocksPerGrid();
+	
 	float mainTime=0;
-  cudaError_t err = cudaSuccess;				// Error code to check return values for CUDA calls
 	size_t free,total,heapSize,stackSize;
-	dim3 threadsPerBlock(THREADSPERBLOCK_X,THREADSPERBLOCK_Y,THREADSPERBLOCK_Z);
-	dim3 blocksPerGrid(BLOCKSPERGRID_X,BLOCKSPERGRID_Y,BLOCKSPERGRID_Z);
-	float stackSizeFactor = STACKSIZEFACTOR;
-	float heapSizeFactor = HEAPSIZEFACTOR;
-	char cfgfile[]="DCEimaging.cfg";
+  cudaError_t err = cudaSuccess;				// Error code to check return values for CUDA calls
 	cudaEvent_t mainStart, mainStop;
 	err = cudaEventCreate(&mainStart);
 	err = cudaEventCreate(&mainStop);
 	err = cudaEventRecord(mainStart, 0);
 
-	/* Reading configuration file */
-  cfgreading(cfgfile,&threadsPerBlock,&blocksPerGrid,&stackSizeFactor,&heapSizeFactor);
-
-	/* Check errors in the GPU initilized variables */
-	if(checkInitErrors(threadsPerBlock,blocksPerGrid,0,0)) return 0;
-
 	printf("* Reading data...\n");
 	matrix<float> t("t.dat");							/* Read t */
   int nt = t.getNumData();							/* Size of temporal dimension */
+	config.setFFTLength(nt);							/* Set the optimal fftLength */			
+	int fftLength = config.getFFTLength();
   float *time = t.getData();						/* Time data */
 	matrix<float> AIF("AIF.dat");					/* Read AIF */
 	matrix<float> Ct("C_t.dat"); 					/* Read C_t but still needs a data reordering */
@@ -74,7 +78,7 @@ int main(void){
 	/* Number of threads, blocks and grids per Kernel */	
 	/**************************************************/
 	/* Check that mriSizes[2] is multiple of (threadsPerBlock.z*blocksPerGrid.z) */
-	if(checkInitErrors(threadsPerBlock,blocksPerGrid,mriSizes[2],nt)) return 0;
+	if(config.sizesError(mriSizes[2])) return 0;
 	dim3 gridsPerKernel(1+(mriSizes[0]-1)/(threadsPerBlock.x*blocksPerGrid.x),1+(mriSizes[1]-1)/(threadsPerBlock.y*blocksPerGrid.y),mriSizes[2]/(threadsPerBlock.z*blocksPerGrid.z));
 	int sliceVoxels = nVoxels/gridsPerKernel.z; 	// Number of voxels per MRI slice
 
@@ -105,13 +109,13 @@ int main(void){
 	matrix<float> iter(3,mriSizes,nVoxels);					/* Number of iterations per voxel */
 	matrix<float> res(3,mriSizes,nVoxels);					/* Residuals per voxel */
 	matrix<float> CtN(4,mriSizes,nVoxels*nt);				/* Numerical approximation of Ct */
-  float *Cp_re = new float[NX];										/* AIF */
-  complex *Cp = new complex[NX];									/* AIF (complex)*/
-  complex *fftCp = new complex[NX];								/* fft(AIF) */
-  for(int i=0;i<NX;i++)	Cp[i] = Cp_re[i] = 0.0;		/* Initialize to 0 all elements */
+  float *Cp_re = new float[fftLength];										/* AIF */
+  complex *Cp = new complex[fftLength];									/* AIF (complex)*/
+  complex *fftCp = new complex[fftLength];								/* fft(AIF) */
+  for(int i=0;i<fftLength;i++)	Cp[i] = Cp_re[i] = 0.0;		/* Initialize to 0 all elements */
   for(int i=0;i<nt;i++)
     Cp[i] = Cp_re[i] = AIF.getDataValue(i);				/* Copy AIF to the real part of Cp */ 
-  CFFT::Forward(Cp,fftCp,NX); 										/* FFT of Cp */
+  CFFT::Forward(Cp,fftCp,fftLength); 										/* FFT of Cp */
 
 	/*****************************/
 	/* Allocate memory in device */
@@ -147,8 +151,8 @@ int main(void){
 	err = cudaMalloc((void**)&dev_converged, sliceVoxels*sizeof(float));
 	err = cudaMalloc((void**)&dev_iter, sliceVoxels*sizeof(float));
 	err = cudaMalloc((void**)&dev_res, sliceVoxels*sizeof(float));
-	err = cudaMalloc((void**)&dev_Cp, NX*sizeof(complex));
-	err = cudaMalloc((void**)&dev_fftCp, NX*sizeof(complex));
+	err = cudaMalloc((void**)&dev_Cp, fftLength*sizeof(complex));
+	err = cudaMalloc((void**)&dev_fftCp, fftLength*sizeof(complex));
 	if ( err != cudaSuccess){
     fprintf(stderr, "Cuda error: Failed to allocate\n");
     return 0;
@@ -168,8 +172,8 @@ int main(void){
 	err = cudaMemcpy(dev_time,time,nt*sizeof(float),cudaMemcpyHostToDevice);
 	err = cudaMemcpy(dev_AIF,Cp_re,nt*sizeof(float),cudaMemcpyHostToDevice);
 	err = cudaMemcpy(dev_mriSizes,mriSizes,(nsd+1)*sizeof(int),cudaMemcpyHostToDevice);
-	err = cudaMemcpy(dev_Cp,Cp,NX*sizeof(complex),cudaMemcpyHostToDevice);
-	err = cudaMemcpy(dev_fftCp,fftCp,NX*sizeof(complex),cudaMemcpyHostToDevice);
+	err = cudaMemcpy(dev_Cp,Cp,fftLength*sizeof(complex),cudaMemcpyHostToDevice);
+	err = cudaMemcpy(dev_fftCp,fftCp,fftLength*sizeof(complex),cudaMemcpyHostToDevice);
 	if ( err != cudaSuccess){
     fprintf(stderr, "Cuda error: Failed to copy data\n");
     return 0;
@@ -220,7 +224,7 @@ int main(void){
 			for(int j=0;j<gridsPerKernel.y;j++){
 				gridIdx.y = j;
 				NLLSQkernel<<<blocksPerGrid,threadsPerBlock>>>(nsd,nt,dev_mriSizes,difft,dev_Ct,dev_time,dev_AIF,
-										dev_Cp,dev_fftCp,dev_vp,dev_ktrans,dev_kep,dev_converged,dev_iter,dev_res,gridIdx);
+										dev_Cp,dev_fftCp,dev_vp,dev_ktrans,dev_kep,dev_converged,dev_iter,dev_res,gridIdx,NLLSQMaxIt,fftLength);
 			}
 			if( (err=cudaDeviceSynchronize()) != cudaSuccess){
 				printf("err = %d\n",err);
@@ -469,7 +473,7 @@ void readFromBinary(const char *filename, T **data, int *ndata, int **sizes, int
 
 __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *Ct, float *t, float *AIF, 
 								complex *Cp_g, complex *fftCp_g, float *vp, float *ktrans, float *kep, float *converged,
-								float *iter, float *res, dim3 gridIdx){
+								float *iter, float *res, dim3 gridIdx, int NLLSQMaxIt, int fftLength){
 
 	int px = threadIdx.x + blockDim.x*blockIdx.x + gridIdx.x*blockDim.x*gridDim.x;
 	int py = threadIdx.y + blockDim.y*blockIdx.y + gridIdx.y*blockDim.y*gridDim.y;
@@ -481,9 +485,9 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
   float *Ct_i = new float[nt];  						/* Ct data from 1 voxel */
   float *Ct_n = new float[nt];							/* Ct numerical approximation */
   float *dCt = new float[nt];								/* Diference between Ct_i and Ct_n */
-  complex *Exp = new complex[NX];						/* Exponential function */
-  complex *fftExp = new complex[NX];				/* fft(Exp) or fft(Exp.*t) */
-  complex *convol = new complex[NX];				/* ifft(fftCp.*fftExp) */
+  complex *Exp = new complex[fftLength];						/* Exponential function */
+  complex *fftExp = new complex[fftLength];				/* fft(Exp) or fft(Exp.*t) */
+  complex *convol = new complex[fftLength];				/* ifft(fftCp.*fftExp) */
   float *integral = new float[nt];					/* Truncated real part of convol using fft(Exp) */
   float *dintegral = new float[nt];					/* Truncated real part of convol using fft(Exp.*t) */
 
@@ -492,13 +496,13 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
 	/*********************************************/
 	float *Cp_re = new float[nt];
 	float *time = new float[nt];
-	complex *Cp = new complex[NX];
-	complex *fftCp = new complex[NX];
+	complex *Cp = new complex[fftLength];
+	complex *fftCp = new complex[fftLength];
 	for(int i=0;i<nt;i++){
 		Cp_re[i] = AIF[i];
 		time[i] = t[i];
 	}
-	for(int i=0;i<NX;i++){
+	for(int i=0;i<fftLength;i++){
 		Exp[i] = 0.0;
 		Cp[i] = Cp_g[i];	
 		fftCp[i] = fftCp_g[i];	
@@ -506,7 +510,7 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
 /*
 	if(px==0&&py==0) {
 		for(int l=0;l<nt;l++) printf("%f %f\n",Cp_re[l],time[l]);
-		for(int l=0;l<NX;l++) printf("%f %f %f %f\n",Exp[l].re(),Cp[l].re(),fftCp[l].re(),fftCp[l].im());
+		for(int l=0;l<fftLength;l++) printf("%f %f %f %f\n",Exp[l].re(),Cp[l].re(),fftCp[l].re(),fftCp[l].im());
 	}
 */
 	/*********************************************/
@@ -524,10 +528,10 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
 		    Ct_i[l] = Ct[data_offset + l];								/* Ct data of voxel(px,py,pz) */
       	Exp[l] = exp(-kep0*time[l]);									/* Exponential function */
 	    }
-      CFFT::Forward(Exp,fftExp,NX);										/* fft(Exp) */
-      for(int l=0;l<NX;l++)
+      CFFT::Forward(Exp,fftExp,fftLength);										/* fft(Exp) */
+      for(int l=0;l<fftLength;l++)
         fftExp[l] *= fftCp[l];												/* fftExp.*fftCp */
-      CFFT::Inverse(fftExp,convol,NX);								/* ifft(fftCp.*fftExp) */
+      CFFT::Inverse(fftExp,convol,fftLength);								/* ifft(fftCp.*fftExp) */
       for(int l=0;l<nt;l++){
         integral[l] = convol[l].re()*difft;						/* Truncated real part of convol using fft(Exp) */
         Ct_n[l] = vp0*Cp_re[l] + ktrans0*integral[l];	/* Ct numerical approximation */
@@ -535,11 +539,11 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
       }
       float r_old = SSQ(dCt,nt);
       
-  /*		printf("%d %d %d %d %d\n",nt,NX,nsd,param_offset,data_offset);
+  /*		printf("%d %d %d %d %d\n",nt,fftLength,nsd,param_offset,data_offset);
 		  printf("%f %f %f %f\n",difft,vp0,ktrans0,kep0);
 		  if(px==0&&py==0&&pz==0) {
 			  for(int l=0;l<nt;l++) printf("%f %f %f %f %f\n",Ct_i[l],Exp[l].re(),integral[l],Ct_n[l],dCt[l]);
-			  for(int l=0;l<NX;l++) printf("%f %f %f %f\n",Exp[l].re(),fftExp[l].re(),fftExp[l].im(),convol[l].re());
+			  for(int l=0;l<fftLength;l++) printf("%f %f %f %f\n",Exp[l].re(),fftExp[l].re(),fftExp[l].im(),convol[l].re());
 		  return;
 		  }
   */
@@ -552,14 +556,14 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
 	    float beta_min[NPARAMS]={vp0,ktrans0,kep0};	/* SHOULD CHANGE IF NPARAMS CHANGE */
       float dr_rel=1e10,dB_rel=1;
       float r_min=1e10,r_new;
-      while( its<MAXIT && (norm(dB,NPARAMS)>1e-3||(dr_rel)>1e-3||r_old==0.0) && kep0>1e-9 ){        
+      while( its<NLLSQMaxIt && (norm(dB,NPARAMS)>1e-3||(dr_rel)>1e-3||r_old==0.0) && kep0>1e-9 ){        
      		its++;
         for(int l=0;l<nt;l++)
           Exp[l] *= time[l];
-        CFFT::Forward(Exp,fftExp,NX);
-        for(int l=0;l<NX;l++)
+        CFFT::Forward(Exp,fftExp,fftLength);
+        for(int l=0;l<fftLength;l++)
           fftExp[l] *= fftCp[l];
-        CFFT::Inverse(fftExp,convol,NX);
+        CFFT::Inverse(fftExp,convol,fftLength);
         for(int l=0;l<nt;l++){
           dintegral[l] = convol[l].re()*difft;
           J[l] = Cp_re[l];    
@@ -569,8 +573,8 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
   /*
 		  if(px==0&&py==0&&pz==0&&its==2) {
 			  for(int l=0;l<nt;l++) printf("%f %f %f %f %f\n",dintegral[l],J[l],J[nt+l],J[2*nt+l],dCt[l]);
-			  for(int l=0;l<NX;l++) printf("%f %f %f\n",fftCp[l].re(),fftCp[l].im(),convol[l].re());
-			  for(int l=0;l<NX;l++) printf("%f %f %f %f\n",Exp[l].re(),Exp[l].im(),fftExp[l].re(),fftExp[l].im());
+			  for(int l=0;l<fftLength;l++) printf("%f %f %f\n",fftCp[l].re(),fftCp[l].im(),convol[l].re());
+			  for(int l=0;l<fftLength;l++) printf("%f %f %f %f\n",Exp[l].re(),Exp[l].im(),fftExp[l].re(),fftExp[l].im());
 		  }
   */
         solveNLLSQ(J,dCt,dB,nt);
@@ -601,7 +605,7 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
         }
 /**/
 				int flag = 1,sub_it=0;
-				while(flag && sub_it<5){
+				while(flag && sub_it<20){
 					sub_it++;
        		vp0 = beta[0]+dB[0];
        		ktrans0 = beta[1]+dB[1];
@@ -611,10 +615,10 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
 /**/
        		for(int l=0;l<nt;l++)
           	Exp[l] = exp(-kep0*time[l]);
-        	CFFT::Forward(Exp,fftExp,NX);
-        	for(int l=0;l<NX;l++)
+        	CFFT::Forward(Exp,fftExp,fftLength);
+        	for(int l=0;l<fftLength;l++)
           	fftExp[l] *= fftCp[l];
-        	CFFT::Inverse(fftExp,convol,NX);
+        	CFFT::Inverse(fftExp,convol,fftLength);
         	for(int l=0;l<nt;l++){
           	integral[l] = convol[l].re()*difft;
           	Ct_n[l] = vp0*Cp_re[l] + ktrans0*integral[l];
@@ -638,8 +642,8 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
   /*
 		  if(px==0&&py==0&&pz==0&&its==2) {
 			  for(int l=0;l<nt;l++) printf("%f %f %f %f\n",integral[l],Ct_i[l],Ct_n[l],dCt[l]);
-			  for(int l=0;l<NX;l++) printf("%f\n",convol[l].re());
-			  for(int l=0;l<NX;l++) printf("%f %f %f %f\n",Exp[l].re(),Exp[l].im(),fftExp[l].re(),fftExp[l].im());
+			  for(int l=0;l<fftLength;l++) printf("%f\n",convol[l].re());
+			  for(int l=0;l<fftLength;l++) printf("%f %f %f %f\n",Exp[l].re(),Exp[l].im(),fftExp[l].re(),fftExp[l].im());
 		  }
   */
         if(r_new<r_min){
@@ -659,11 +663,11 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
 */
         r_old = r_new;
       }
-      if(its!=MAXIT)	
+      if(its!=NLLSQMaxIt)	
 		    converged[param_offset] = 1;
       vp[param_offset] = beta_min[0];
       ktrans[param_offset] = beta_min[1];
-//			if(beta_min[1]<1e-9) beta_min[2]=0;
+			if(beta_min[1]<1e-6) beta_min[2]=1e-6;
       kep[param_offset] = beta_min[2];
       iter[param_offset] = its;
       res[param_offset] = r_min;
@@ -699,51 +703,4 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
 	delete[] fftCp;
 
 	return;
-}
-
-int checkInitErrors(dim3 threadsPerBlock, dim3 blocksPerGrid, int mri_zdim, int nt){
-	int flag = 0;
-	cudaDeviceProp deviceProp;
-  cudaGetDeviceProperties(&deviceProp, 0);
-  if((threadsPerBlock.x*threadsPerBlock.y*threadsPerBlock.z)%deviceProp.warpSize){
-    printf("threadsPerBlock.x*threadsPerBlock.y*threadsPerBlock.z (%d x %d x %d = %d) must be divisible by the Warp Size (%d).\n",threadsPerBlock.x,threadsPerBlock.y,threadsPerBlock.z,threadsPerBlock.x*threadsPerBlock.y*threadsPerBlock.z,deviceProp.warpSize);
-    flag = 1;
-  }
-  if((threadsPerBlock.x*threadsPerBlock.y*threadsPerBlock.z)>deviceProp.maxThreadsPerBlock){
-    printf("threadsPerBlock.x*threadsPerBlock.y*threadsPerBlock.z (%d x %d x %d = %d) must be <= %d.\n",threadsPerBlock.x,threadsPerBlock.y,threadsPerBlock.z,threadsPerBlock.x*threadsPerBlock.y*threadsPerBlock.z,deviceProp.maxThreadsPerBlock);
-    flag = 1;
-  }
-  if(threadsPerBlock.x>deviceProp.maxThreadsDim[0]){
-    printf("threadsPerBlock.x (%d) must be <= %d.\n",threadsPerBlock.x,deviceProp.maxThreadsDim[0]);
-    flag = 1;
-  }
-  if(threadsPerBlock.y>deviceProp.maxThreadsDim[1]){
-    printf("threadsPerBlock.y (%d) must be <= %d.\n",threadsPerBlock.y,deviceProp.maxThreadsDim[1]);
-    flag = 1;
-  }
-  if(threadsPerBlock.z>deviceProp.maxThreadsDim[2]){
-    printf("threadsPerBlock.z (%d) must be <= %d.\n",threadsPerBlock.z,deviceProp.maxThreadsDim[2]);
-    flag = 1;
-  }
-  if(blocksPerGrid.x>deviceProp.maxGridSize[0]){
-    printf("blocksPerGrid.x (%d) must be <= %d.\n",blocksPerGrid.x,deviceProp.maxGridSize[0]);
-    flag = 1;
-  }
-  if(blocksPerGrid.y>deviceProp.maxGridSize[1]){
-    printf("blocksPerGrid.y (%d) must be <= %d.\n",blocksPerGrid.y,deviceProp.maxGridSize[1]);
-    flag = 1;
-  }
-  if(blocksPerGrid.z>deviceProp.maxGridSize[2]){
-    printf("blocksPerGrid.z (%d) must be <= %d.\n",blocksPerGrid.z,deviceProp.maxGridSize[2]);
-    flag = 1;
-  }
-	if(mri_zdim%(threadsPerBlock.z*blocksPerGrid.z)){
-		printf("MRI z-dimension (%d) must my multiple of threadsPerBlock.z*blocksPerGrid.z (%d)\n",mri_zdim,(threadsPerBlock.z*blocksPerGrid.z));	
-		flag = 1;
-	}
-	if(nt>NX){
-		printf("MRI time samples > fft vector lenght paramater (%d > %d)\n",nt,NX);	
-		flag = 1;
-	}
-	return flag;
 }

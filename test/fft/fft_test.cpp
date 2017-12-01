@@ -1,8 +1,8 @@
 #include <stdio.h>
 #include <math.h>
 #include <vector>
-#include "../FFT_CODE/fft.h"
-#include "../FFT_CODE/complex.h"
+#include "../../src/FFT_CODE/fft.h"
+#include "../../src/FFT_CODE/complex.h"
 
 #define NX 64
 #define ndata 30

@@ -24,7 +24,9 @@ export NVCCFLAGS
 
 ################################################################################
 
-ARCH ?= -arch=sm_30
+arch ?= sm_30
+ARCH = -arch=$(arch)
+export ARCH
 
 # Gencode arguments
 SMS ?= 30 35 37 50 52 60 61
@@ -38,7 +40,6 @@ ifneq ($(HIGHEST_SM),)
 GENCODE_FLAGS += -gencode arch=compute_$(HIGHEST_SM),code=compute_$(HIGHEST_SM)
 endif
 
-export ARCH
 export GENCODE_FLAGS
 
 ################################################################################
@@ -58,6 +59,7 @@ $(PROGRAM): FFTsrc $(FFTOBJS) $(OBJS)
 	$(NVCC) $(GDB)$(OPT) $(ARCH) $(GENCODE_FLAGS) $(OBJS) $(FFTOBJS) $(LIBDIR)$(LIBS) -o $(PROG) 
 
 FFTsrc:
+	@echo $(DEBUG) $(NVCCFLAGS)
 	(cd $(FFTDIR); make -f Makefile.cuda; cp *.o $(CURDIR)/)
 
 clean: 

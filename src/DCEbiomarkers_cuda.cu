@@ -605,7 +605,7 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
         }
 /**/
 				int flag = 1,sub_it=0;
-				while(flag && sub_it<5){
+				while(flag && sub_it<20){
 					sub_it++;
        		vp0 = beta[0]+dB[0];
        		ktrans0 = beta[1]+dB[1];
@@ -667,7 +667,7 @@ __global__ void NLLSQkernel(int nsd, int nt, int *mriSizes, float difft, float *
 		    converged[param_offset] = 1;
       vp[param_offset] = beta_min[0];
       ktrans[param_offset] = beta_min[1];
-//			if(beta_min[1]<1e-9) beta_min[2]=0;
+			if(beta_min[1]<1e-6) beta_min[2]=1e-6;
       kep[param_offset] = beta_min[2];
       iter[param_offset] = its;
       res[param_offset] = r_min;
